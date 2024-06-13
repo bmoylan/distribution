@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -11,6 +12,30 @@ func TestPathMapper(t *testing.T) {
 		spec     pathSpec
 		expected string
 	}{
+		{
+			spec:     blobsPathSpec{},
+			expected: "/docker/registry/v2/blobs",
+		},
+		{
+			spec:     blobPathSpec{digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+			expected: "/docker/registry/v2/blobs/sha256/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		},
+		{
+			spec:     blobDataPathSpec{digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+			expected: "/docker/registry/v2/blobs/sha256/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789/data",
+		},
+		{
+			spec:     repositoriesRootPathSpec{},
+			expected: "/docker/registry/v2/repositories",
+		},
+		{
+			spec:     manifestsPathSpec{name: "foo/bar"},
+			expected: "/docker/registry/v2/repositories/foo/bar/_manifests",
+		},
+		{
+			spec:     manifestRevisionsPathSpec{name: "foo/bar"},
+			expected: "/docker/registry/v2/repositories/foo/bar/_manifests/revisions",
+		},
 		{
 			spec: manifestRevisionPathSpec{
 				name:     "foo/bar",
@@ -87,6 +112,18 @@ func TestPathMapper(t *testing.T) {
 			spec:     layersPathSpec{name: "foo/bar"},
 			expected: "/docker/registry/v2/repositories/foo/bar/_layers",
 		},
+		{
+			spec:     layerLinkPathSpec{name: "foo/bar", digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+			expected: "/docker/registry/v2/repositories/foo/bar/_layers/sha256/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789/link",
+		},
+		{
+			spec:     uploadHashStatePathSpec{name: "foo/bar", id: "asdf-asdf-asdf-adsf", alg: "sha256", offset: 1234, list: false},
+			expected: "/docker/registry/v2/repositories/foo/bar/_uploads/asdf-asdf-asdf-adsf/hashstates/sha256/1234",
+		},
+		{
+			spec:     uploadHashStatePathSpec{name: "foo/bar", id: "asdf-asdf-asdf-adsf", alg: "sha256", list: true},
+			expected: "/docker/registry/v2/repositories/foo/bar/_uploads/asdf-asdf-asdf-adsf/hashstates/sha256",
+		},
 	} {
 		p, err := pathFor(testcase.spec)
 		if err != nil {
@@ -95,6 +132,14 @@ func TestPathMapper(t *testing.T) {
 
 		if p != testcase.expected {
 			t.Fatalf("unexpected path generated (%T): %q != %q", testcase.spec, p, testcase.expected)
+		}
+
+		ps, err := pathFrom(p)
+		if err != nil {
+			t.Fatalf("unexpected parsing path (%T): %v", testcase.spec, err)
+		}
+		if !reflect.DeepEqual(ps, testcase.spec) {
+			t.Fatalf("unexpected path parsed (%T): %#v != %#v", testcase.spec, ps, testcase.spec)
 		}
 	}
 

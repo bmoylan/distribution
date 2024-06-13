@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/opencontainers/go-digest"
@@ -129,9 +130,8 @@ func pathFor(spec pathSpec) (string, error) {
 	// to an intermediate path object, than can be consumed and mapped by the
 	// other version.
 
-	rootPrefix := []string{storagePathRoot, storagePathVersion}
-	repoPrefix := append(rootPrefix, "repositories")
-
+	repoPrefix := []string{storagePathRoot, storagePathVersion, "repositories"}
+	blobPrefix := []string{storagePathRoot, storagePathVersion, "blobs"}
 	switch v := spec.(type) {
 
 	case manifestsPathSpec:
@@ -218,16 +218,14 @@ func pathFor(spec pathSpec) (string, error) {
 	case layersPathSpec:
 		return path.Join(append(repoPrefix, v.name, "_layers")...), nil
 	case blobsPathSpec:
-		blobsPathPrefix := append(rootPrefix, "blobs")
-		return path.Join(blobsPathPrefix...), nil
+		return path.Join(blobPrefix...), nil
 	case blobPathSpec:
 		components, err := digestPathComponents(v.digest, true)
 		if err != nil {
 			return "", err
 		}
 
-		blobPathPrefix := append(rootPrefix, "blobs")
-		return path.Join(append(blobPathPrefix, components...)...), nil
+		return path.Join(append(blobPrefix, components...)...), nil
 	case blobDataPathSpec:
 		components, err := digestPathComponents(v.digest, true)
 		if err != nil {
@@ -235,8 +233,7 @@ func pathFor(spec pathSpec) (string, error) {
 		}
 
 		components = append(components, "data")
-		blobPathPrefix := append(rootPrefix, "blobs")
-		return path.Join(append(blobPathPrefix, components...)...), nil
+		return path.Join(append(blobPrefix, components...)...), nil
 
 	case uploadDataPathSpec:
 		return path.Join(append(repoPrefix, v.name, "_uploads", v.id, "data")...), nil
@@ -253,6 +250,114 @@ func pathFor(spec pathSpec) (string, error) {
 	default:
 		// TODO(sday): This is an internal error. Ensure it doesn't escape (panic?).
 		return "", fmt.Errorf("unknown path spec: %#v", v)
+	}
+}
+
+func pathFrom(stringPath string) (pathSpec, error) {
+	stringPath = path.Clean(stringPath)
+	blobPrefix := path.Join(storagePathRoot, storagePathVersion, "blobs")
+	repoPrefix := path.Join(storagePathRoot, storagePathVersion, "repositories")
+	switch {
+	case stringPath == blobPrefix:
+		return blobsPathSpec{}, nil
+	case strings.HasPrefix(stringPath, blobPrefix):
+		dgst, err := digestFromPath(stringPath)
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasSuffix(stringPath, "/data") {
+			return blobDataPathSpec{digest: dgst}, nil
+		}
+		return blobPathSpec{digest: dgst}, nil
+	case stringPath == repoPrefix:
+		return repositoriesRootPathSpec{}, nil
+	case strings.HasPrefix(stringPath, repoPrefix):
+		if manifestsIdx := strings.LastIndex(stringPath, "/_manifests"); manifestsIdx > -1 {
+			name := stringPath[len(repoPrefix)+1 : manifestsIdx]
+			subPath := stringPath[manifestsIdx+len("/_manifests"):]
+			switch {
+			case subPath == "":
+				return manifestsPathSpec{name: name}, nil
+			case subPath == "/revisions":
+				return manifestRevisionsPathSpec{name: name}, nil
+			case subPath == "/tags":
+				return manifestTagsPathSpec{name: name}, nil
+			case strings.HasPrefix(subPath, "/revisions/"):
+				dgst, err := digestFromPath(subPath)
+				if err != nil {
+					return nil, err
+				}
+				if strings.HasSuffix(subPath, "/link") {
+					return manifestRevisionLinkPathSpec{name: name, revision: dgst}, nil
+				}
+				return manifestRevisionPathSpec{name: name, revision: dgst}, nil
+
+			case strings.HasPrefix(subPath, "/tags/"):
+				if strings.HasSuffix(subPath, "/current/link") {
+					tag := subPath[len("/tags/") : len(subPath)-len("/current/link")]
+					return manifestTagCurrentPathSpec{name: name, tag: tag}, nil
+				}
+				if strings.HasSuffix(subPath, "/index") {
+					tag := subPath[len("/tags/") : len(subPath)-len("/index")]
+					return manifestTagIndexPathSpec{name: name, tag: tag}, nil
+				}
+				if indexIdx := strings.LastIndex(subPath, "/index/"); indexIdx > -1 {
+					tag := subPath[len("/tags/"):indexIdx]
+					dgst, err := digestFromPath(subPath)
+					if err != nil {
+						return nil, err
+					}
+					if strings.HasSuffix(subPath, "/link") {
+						return manifestTagIndexEntryLinkPathSpec{name: name, tag: tag, revision: dgst}, nil
+					}
+					return manifestTagIndexEntryPathSpec{name: name, tag: tag, revision: dgst}, nil
+				}
+				return manifestTagPathSpec{name: name, tag: subPath[len("/tags/"):]}, nil
+			default:
+				return nil, fmt.Errorf("unknown manifest path: %q", stringPath)
+			}
+		} else if layersIdx := strings.LastIndex(stringPath, "/_layers"); layersIdx > -1 {
+			name := stringPath[len(repoPrefix)+1 : layersIdx]
+			if len(stringPath) == layersIdx+len("/_layers") {
+				return layersPathSpec{name: name}, nil
+			}
+			dgst, err := digestFromPath(stringPath)
+			if err != nil {
+				return nil, err
+			}
+			if strings.HasSuffix(stringPath, "/link") {
+				return layerLinkPathSpec{name: name, digest: dgst}, nil
+			}
+			return nil, fmt.Errorf("unknown layer path: %q", stringPath)
+		} else if uploadsIdx := strings.LastIndex(stringPath, "/_uploads/"); uploadsIdx > -1 {
+			name := stringPath[len(repoPrefix)+1 : uploadsIdx]
+			subPath := stringPath[uploadsIdx+len("/_uploads/"):]
+			if strings.HasSuffix(subPath, "/data") {
+				id := subPath[:len(subPath)-len("/data")]
+				return uploadDataPathSpec{name: name, id: id}, nil
+			}
+			if strings.HasSuffix(subPath, "/startedat") {
+				id := subPath[:len(subPath)-len("/startedat")]
+				return uploadStartedAtPathSpec{name: name, id: id}, nil
+			}
+			if hashstatesIdx := strings.LastIndex(subPath, "/hashstates/"); hashstatesIdx > -1 {
+				id := subPath[:hashstatesIdx]
+				parent, base := path.Split(subPath[hashstatesIdx+len("/hashstates/"):])
+				if parent == "" {
+					return uploadHashStatePathSpec{name: name, id: id, alg: digest.Algorithm(base), list: true}, nil
+				}
+				offset, err := strconv.ParseInt(base, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				alg := digest.Algorithm(path.Base(parent))
+				return uploadHashStatePathSpec{name: name, id: id, alg: alg, offset: offset, list: false}, nil
+			}
+			return nil, fmt.Errorf("unknown upload path: %q", stringPath)
+		}
+		return nil, fmt.Errorf("unknown repository path: %q", stringPath)
+	default:
+		return nil, fmt.Errorf("unknown path: %q", stringPath)
 	}
 }
 
@@ -482,6 +587,7 @@ func digestPathComponents(dgst digest.Digest, multilevel bool) ([]string, error)
 // Reconstructs a digest from a path
 func digestFromPath(digestPath string) (digest.Digest, error) {
 	digestPath = strings.TrimSuffix(digestPath, "/data")
+	digestPath = strings.TrimSuffix(digestPath, "/link")
 	dir, hex := path.Split(digestPath)
 	dir = path.Dir(dir)
 	dir, next := path.Split(dir)
